@@ -50,23 +50,11 @@ GeneratorDataset至少需要包含：
 - source：一个python迭代器；
 - column_names：迭代器__getitem__方法每个输出的名字。
 
-此外，还有一些常用的配置：
-
-- num_parallel_workers：GeneratorDataset多进程并行处理的进程数；
-- shuffle：是否随机打乱；
-- num_shards：并行场景配合shard_id使用，数据切片个数
-- shard_id：并行场景配合num_shards使用，数据切片id
-
 更多使用方法参考[GeneratorDataset](https://www.mindspore.cn/docs/zh-CN/master/api_python/dataset/mindspore.dataset.GeneratorDataset.html#mindspore.dataset.GeneratorDataset)。
 
 dataset.batch将数据集中连续batch_size条数据组合为一个批数据，至少需要包含：
 
 - batch_size：指定每个批处理数据包含的数据条目
-
-此外，还有一些常用的配置：
-
-- drop_remainder：当最后一个批处理数据包含的数据条目小于 batch_size 时，是否将该批处理丢弃；
-- num_parallel_workers：batch操作多线程并行处理的线程数；
 
 更多使用方法参考[Dataset.batch](https://www.mindspore.cn/docs/zh-CN/master/api_python/dataset/dataset_method/batch/mindspore.dataset.Dataset.batch.html)。
 
@@ -98,18 +86,18 @@ MindSpore的网络搭建主要使用Cell进行图的构造，用户需要定义�
 ```python
 import torch
 
-class MyCell_pt(torch.nn.Module):
+class Network(torch.nn.Module):
     def __init__(self, forward_net):
-        super(MyCell_pt, self).__init__()
+        super(Network, self).__init__()
         self.net = forward_net
 
     def forward(self, x):
         y = self.net(x)
         return torch.nn.functional.relu(y)
 
-inner_net_pt = torch.nn.Conv2d(120, 240, kernel_size=4, bias=False)
-pt_net = MyCell_pt(inner_net_pt)
-for i in pt_net.parameters():
+inner_net = torch.nn.Conv2d(120, 240, kernel_size=4, bias=False)
+net = Network(inner_net)
+for i in net.parameters():
     print(i)
 ```
 </pre>
@@ -119,9 +107,9 @@ for i in pt_net.parameters():
 ```python
 from mindspore import mint, nn
 
-class MyCell(nn.Cell):
+class Network(nn.Cell):
     def __init__(self, forward_net):
-        super(MyCell, self).__init__(auto_prefix=True)
+        super(Network, self).__init__()
         self.net = forward_net
 
     def construct(self, x):
@@ -129,8 +117,8 @@ class MyCell(nn.Cell):
         return mint.nn.functional.relu(y)
 
 inner_net = mint.nn.Conv2d(120, 240, kernel_size=4, bias=False)
-my_net = MyCell(inner_net)
-for i in my_net.trainable_params():
+net = Network(inner_net)
+for i in net.get_parameters():
     print(i)
 ```
 </pre>
@@ -138,13 +126,13 @@ for i in my_net.trainable_params():
 </tr>
 </table>
 
-MindSpore和PyTorch构建模型的方法差不多，使用算子的差别可以参考[API差异文档](https://www.mindspore.cn/docs/zh-CN/r2.4.0/note/api_mapping/pytorch_diff/Conv2d.html)。
+MindSpore和PyTorch构建模型的方法差不多，使用算子的差别可以参考[API差异文档](https://www.mindspore.cn/docs/zh-CN/master/note/api_mapping/pytorch_api_mapping.html)。
 
 ### 模型保存和加载
 
 PyTorch提供了 `state_dict()` 用于参数状态的查看及保存，`load_state_dict` 用于模型参数的加载。
 
-MindSpore的优化器模块继承自 `Cell`，使用 `save_checkpoint` 与`load_checkpoint` 。
+MindSpore可以使用使用 `save_checkpoint` 与`load_checkpoint` 。
 
 <table class="colwidths-auto docutils align-default">
 <tr>
@@ -172,116 +160,28 @@ pt_model.load_state_dict(state_dict)
 ms.save_checkpoint(ms_model, save_path)
 
 # 使用ms.load_checkpoint()加载保存的ckpt文件，
-# 然后使用load_param_into_net将获取到的param_dict加载到模型中
+# 然后使用load_state_dict将获取到的param_dict加载到模型中
 param_dict = ms.load_checkpoint(save_path)
-ms.load_param_into_net(ms_model, param_dict)
+ms_model.load_state_dict(param_dict)
 ```
 </pre>
 </td>
 </tr>
 </table>
 
-### 单元测试
-
-为了保证构建的MindSpore的Cell迁移正确，需要使用相同的输入数据和参数，对输出做比较：
-
-```python
-import numpy as np
-import mindspore as ms
-from mindspore import ops, nn
-import torch
-
-def get_pt2ms_mappings(m):
-    mappings = {}  # pt_param_name: (ms_param_name, pt_param_to_ms_param_func)
-    for name, cell in m.cells_and_names():
-        if isinstance(cell, (nn.Conv1d, nn.Conv1dTranspose)):
-            mappings[f"{name}.weight"] = f"{name}.weight", lambda x: ms.Parameter(
-                ops.expand_dims(x, axis=-2), name=f"{name}.weight"
-            )
-        elif isinstance(cell, nn.Embedding):
-            mappings[f"{name}.weight"] = f"{name}.embedding_table", lambda x: x
-        elif isinstance(cell, (nn.BatchNorm2d, nn.LayerNorm, nn.GroupNorm)):
-            mappings[f"{name}.weight"] = f"{name}.gamma", lambda x: x
-            mappings[f"{name}.bias"] = f"{name}.beta", lambda x: x
-            if isinstance(cell, (nn.BatchNorm2d,)):
-                mappings[f"{name}.running_mean"] = f"{name}.moving_mean", lambda x: x
-                mappings[f"{name}.running_var"] = f"{name}.moving_variance", lambda x: x
-                mappings[f"{name}.num_batches_tracked"] = None, lambda x: x
-    return mappings
-
-def convert_state_dict(m, state_dict_pt):
-    dtype_mappings = {
-        torch.float16: ms.float16,
-        torch.float32: ms.float32,
-        torch.bfloat16: ms.bfloat16,
-    }
-
-    mappings = get_pt2ms_mappings(m)
-    state_dict_ms = {}
-    for name_pt, data_pt in state_dict_pt.items():
-        name_ms, data_mapping = mappings.get(name_pt, (name_pt, lambda x: x))
-        data_ms = ms.Parameter(
-            data_mapping(ms.Tensor.from_numpy(data_pt.float().numpy()).to(dtype_mappings[data_pt.dtype])), name=name_ms
-        )
-        if name_ms is not None:
-            state_dict_ms[name_ms] = data_ms
-    return state_dict_ms
-
-my_net = MSNet()
-pt_net = PTNet()
-
-ms.load_param_into_net(my_net, convert_state_dict(my_net, pt_net.state_dict()), strict_load=True)
-
-# 构造随机输入
-x = np.random.uniform(-1, 1, (2, 120, 12, 12)).astype(np.float32)
-
-y_ms = my_net(ms.Tensor(x))
-y_pt = pt_net(torch.from_numpy(x))
-diff = np.max(np.abs(y_ms.asnumpy() - y_pt.detach().numpy()))
-print(diff)
-```
-
-**在迁移Cell的过程中最好对每个Cell都做一次单元测试，保证迁移的一致性。**
-
-## 损失函数
-
-在阅读本章节之前，请先阅读MindSpore官网教程[损失函数](https://www.mindspore.cn/docs/zh-CN/master/model_train/custom_program/loss.html)。
-
-MindSpore官网教程损失函数中讲解了内置、自定义和多标签损失函数，以及在模型训练中的使用指导。这里就MindSpore的损失函数与PyTorch的损失函数在功能和接口差异方面给出差异列表。
-
-| torch.nn | torch.nn.functional | mindspore.nn | mindspore.ops | 差异说明 |
-| -------- | ------------------- | ------------ | ------------- | ------- |
-| torch.nn.L1Loss | torch.nn.functional.l1_loss | mindspore.nn.L1Loss| mindspore.ops.l1_loss| 一致 |
-| torch.nn.MSELoss | torch.nn.functional.mse_loss | mindspore.nn.MSELoss| mindspore.ops.mse_loss| 一致 |
-| torch.nn.CrossEntropyLoss | torch.nn.functional.cross_entropy | mindspore.nn.CrossEntropyLoss| mindspore.ops.cross_entropy| [nn接口差异](https://www.mindspore.cn/docs/zh-CN/r2.4.0/note/api_mapping/pytorch_diff/CrossEntropyLoss.html) |
-| torch.nn.CTCLoss | torch.nn.functional.ctc_loss | mindspore.nn.CTCLoss| mindspore.ops.ctc_loss| 一致 |
-| torch.nn.NLLLoss | torch.nn.functional.nll_loss | mindspore.nn.NLLLoss| mindspore.ops.nll_loss| 一致 |
-| torch.nn.PoissonNLLLoss | torch.nn.functional.poisson_nll_loss | mindspore.nn.PoissonNLLLoss| - | 一致 |
-| torch.nn.GaussianNLLLoss | torch.nn.functional.gaussian_nll_loss | mindspore.nn.GaussianNLLLoss| mindspore.ops.gaussian_nll_loss | 一致 |
-| torch.nn.KLDivLoss | torch.nn.functional.kl_div | mindspore.nn.KLDivLoss| mindspore.ops.kl_div| MindSpore不支持 `log_target` 参数 |
-| torch.nn.BCELoss | torch.nn.functional.binary_cross_entropy | mindspore.nn.BCELoss| mindspore.ops.binary_cross_entropy| 一致 |
-| torch.nn.BCEWithLogitsLoss | torch.nn.functional.binary_cross_entropy_with_logits | mindspore.nn.BCEWithLogitsLoss| mindspore.ops.binary_cross_entropy_with_logits| 一致 |
-| torch.nn.MarginRankingLoss | torch.nn.functional.margin_ranking_loss | mindspore.nn.MarginRankingLoss| mindspore.ops.margin_ranking_loss | 一致 |
-| torch.nn.HingeEmbeddingLoss | torch.nn.functional.hinge_embedding_loss | mindspore.nn.HingeEmbeddingLoss| mindspore.ops.hinge_embedding_loss | 一致 |
-| torch.nn.MultiLabelMarginLoss | torch.nn.functional.multilabel_margin_loss | mindspore.nn.MultiLabelMarginLoss | mindspore.ops.multilabel_margin_loss| 一致 |
-| torch.nn.HuberLoss | torch.nn.functional.huber_loss | mindspore.nn.HuberLoss | mindspore.ops.huber_loss| 一致 |
-| torch.nn.SmoothL1Loss | torch.nn.functional.smooth_l1_loss | mindspore.nn.SmoothL1Loss | mindspore.ops.smooth_l1_loss| 一致 |
-| torch.nn.SoftMarginLoss | torch.nn.functional.soft_margin_loss | mindspore.nn.SoftMarginLoss| mindspore.ops.soft_margin_loss | 一致 |
-| torch.nn.MultiLabelSoftMarginLoss | torch.nn.functional.multilabel_soft_margin_loss | mindspore.nn.MultiLabelSoftMarginLoss| mindspore.ops.multilabel_soft_margin_loss| 一致 |
-| torch.nn.CosineEmbeddingLoss | torch.nn.functional.cosine_embedding_loss | mindspore.nn.CosineEmbeddingLoss| mindspore.ops.cosine_embedding_loss| 一致 |
-| torch.nn.MultiMarginLoss | torch.nn.functional.multi_margin_loss | mindspore.nn.MultiMarginLoss | mindspore.ops.multi_margin_loss | 一致 |
-| torch.nn.TripletMarginLoss | torch.nn.functional.triplet_margin_loss | mindspore.nn.TripletMarginLoss| mindspore.ops.triplet_margin_loss | [功能一致，参数个数或顺序不一致](https://www.mindspore.cn/docs/zh-CN/r2.4.0/note/api_mapping/pytorch_diff/TripletMarginLoss.html) |
-| torch.nn.TripletMarginWithDistanceLoss | torch.nn.functional.triplet_margin_with_distance_loss | mindspore.nn.TripletMarginWithDistanceLoss | - | 一致 |
-
 ## 优化器
 
-PyTorch和MindSpore同时支持的优化器异同比较详见[API映射表](https://mindspore.cn/docs/zh-CN/master/note/api_mapping/pytorch_api_mapping.html#torch-optim)。MindSpore暂不支持的优化器：LBFGS、NAdam、RAdam。
+PyTorch和MindSpore同时支持的优化器异同比较详见[API映射表](https://mindspore.cn/docs/zh-CN/master/note/api_mapping/pytorch_api_mapping.html#torch-optim)。
 
 ### 优化器的执行和使用差异
 
-PyTorch单步执行优化器时，一般需要手动执行 `zero_grad()` 方法将历史梯度设置为 ``0`` （或 ``None`` ），然后使用 `loss.backward()` 计算当前训练step的梯度，最后调用优化器的 `step()` 方法实现网络权重的更新；
+PyTorch单步执行优化器时，一般需要手动执行 `zero_grad()` 方法将历史梯度设置为 ``0``，然后使用 `loss.backward()` 计算当前训练step的梯度，最后调用优化器的 `step()` 方法实现网络权重的更新；
 
 使用MindSpore中的优化器时，只需要直接对梯度进行计算，然后使用 `optimizer(grads)` 执行网络权重的更新。
+
+如果在训练过程中需要动态调整学习率，PyTorch提供了 `LRScheduler` 类用于对学习率管理。使用动态学习率时，将 `optimizer` 实例传入 `LRScheduler` 子类中，通过循环调用 `scheduler.step()` 执行学习率修改，并将修改同步至优化器中。
+
+MindSpore提供了`Cell`和`list`两种动态修改学习率的方法。使用时对应动态学习率对象直接传入优化器，学习率的更新在优化器中自动执行，具体请参考[动态学习率](https://mindspore.cn/docs/zh-CN/master/api_python/mindspore.nn.html#%E5%8A%A8%E6%80%81%E5%AD%A6%E4%B9%A0%E7%8E%87)。
 
 <table class="colwidths-auto docutils align-default">
 <tr>
@@ -323,12 +223,6 @@ optimizer(grads)
 </td>
 </tr>
 </table>
-
-### 学习率策略对比
-
-PyTorch中定义了 `LRScheduler` 类用于对学习率进行管理。使用动态学习率时，将 `optimizer` 实例传入 `LRScheduler` 子类中，通过循环调用 `scheduler.step()` 执行学习率修改，并将修改同步至优化器中。
-
-MindSpore中的动态学习率有 `Cell` 和 `list` 两种实现方式，两种类型的动态学习率使用方式一致，都是在实例化完成之后传入优化器，前者在内部的 `construct` 中进行每一步学习率的计算，后者直接按照计算逻辑预生成学习率列表，训练过程中内部实现学习率的更新。具体请参考[动态学习率](https://mindspore.cn/docs/zh-CN/master/api_python/mindspore.nn.html#%E5%8A%A8%E6%80%81%E5%AD%A6%E4%B9%A0%E7%8E%87)。
 
 ## 自动微分
 
@@ -497,35 +391,3 @@ class Trainer:
             ms.save_checkpoint(self.net, "best.ckpt")
             print(f"Updata best acc: {accuracy}")
 ```
-
-### 分布式训练
-
-以数据并行为例，首先指定运行模式、硬件设备等，通过init()初始化HCCL、NCCL或MCCL通信域。
-
-```python
-import mindspore as ms
-from mindspore.communication import init
-
-ms.set_context(mode=ms.GRAPH_MODE)
-ms.set_auto_parallel_context(parallel_mode=ms.ParallelMode.DATA_PARALLEL, gradients_mean=True)
-init()
-ms.set_seed(1)
-
-# 模型定义与Trainer构建同上
-...
-trainer = Trainer(...)
-trainer.train()
-```
-
-准备启动脚本:
-
-```shell
-# 单机8卡
-msrun --worker_num=8 --local_worker_num=8 net.py
-```
-
-更多细节详见[msrun](https://www.mindspore.cn/docs/zh-CN/r2.5.0/model_train/parallel/msrun_launcher.html)。
-
-### 离线推理
-
-除了可以在线推理外，MindSpore提供了很多离线推理的方法适用于不同的环境，详情请参考[模型推理](https://www.mindspore.cn/docs/zh-CN/r2.5.0/model_infer/ms_infer/llm_inference_overview.html)。
